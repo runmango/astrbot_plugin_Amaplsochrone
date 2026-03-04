@@ -1,0 +1,8 @@
+{
+  "amap_key": {
+    "description": "高德 Web 服务 API Key（必填），用于地理编码与等时圈、静态地图。请在 高德开放平台 申请 Web 服务类型 Key。",
+    "type": "string",
+    "default": "",
+    "hint": "在高德开放平台 console.amap.com 创建应用并添加 Web 服务 Key"
+  }
+}
