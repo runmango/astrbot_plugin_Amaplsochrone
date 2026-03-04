@@ -4,5 +4,12 @@
     "type": "string",
     "default": "",
     "hint": "在高德开放平台 console.amap.com 创建应用并添加 Web 服务 Key"
+  },
+  "default_transport": {
+    "description": "默认交通方式（等时圈未指定方式时使用），与高德地图可查询方式一致。",
+    "type": "string",
+    "default": "地铁",
+    "options": ["地铁", "公交", "地铁公交", "步行", "驾车"],
+    "hint": "可选：地铁、公交、地铁公交、步行、驾车"
   }
 }

@@ -10,20 +10,24 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 
-# 默认：60 分钟，公交
+# 默认：60 分钟，地铁
 DEFAULT_TIME = 60
-DEFAULT_MODE = "bus"
+DEFAULT_MODE = "SUBWAY"
 
-# 方式 -> 高德到达圈 policy（若 REST 支持）
+# 方式 -> 高德到达圈 policy（与高德地图可查询方式一致）
 MODE_TO_POLICY = {
     "公交": "BUS",
     "地铁": "SUBWAY",
     "地铁公交": "SUBWAY,BUS",
+    "步行": "WALK",
+    "驾车": "DRIVE",
     "bus": "BUS",
     "subway": "SUBWAY",
     "walk": "WALK",
     "drive": "DRIVE",
 }
+# 配置项 default_transport 可选值（高德支持）
+CONFIG_TRANSPORT_OPTIONS = ("地铁", "公交", "地铁公交", "步行", "驾车")
 
 # 静态图 paths 样式：线宽,线色,线透明度,填充色,填充透明度
 # 半透明蓝 0x0000FF，填充透明度约 0.33
@@ -197,10 +201,9 @@ def _short_analysis(place: str, time_min: int, mode: str, is_approx: bool) -> st
     return f"在 {time_min} 分钟内通过 {mode_cn} 可从「{place}」到达图中蓝色区域内的任意地点。"
 
 
-def _parse_args(text: str) -> Tuple[str, int, str]:
-    """解析 '等时圈 [地点] [时间/可选] [方式/可选]'。"""
+def _parse_args(text: str, default_policy: str = DEFAULT_MODE) -> Tuple[str, int, str]:
+    """解析 '等时圈 [地点] [时间/可选] [方式/可选]'，未指定方式时使用 default_policy。"""
     text = (text or "").strip()
-    # 去掉首条指令名（可能已由 filter 去掉）
     for prefix in ("等时圈", "等时圈 "):
         if text.startswith(prefix):
             text = text[len(prefix) :].strip()
@@ -208,17 +211,16 @@ def _parse_args(text: str) -> Tuple[str, int, str]:
     parts = re.split(r"\s+", text, maxsplit=2)
     place = (parts[0] or "").strip()
     time_min = DEFAULT_TIME
-    mode = "BUS"  # 默认公交
+    mode = default_policy
     if len(parts) >= 2 and parts[1]:
         try:
             time_min = int(parts[1])
             time_min = max(1, min(60, time_min))
         except ValueError:
-            # 第二段当作文本并入地点
             place = f"{place} {parts[1]}".strip()
     if len(parts) >= 3 and parts[2]:
         raw_mode = parts[2].strip()
-        mode = MODE_TO_POLICY.get(raw_mode) or MODE_TO_POLICY.get(raw_mode.lower()) or "BUS"
+        mode = MODE_TO_POLICY.get(raw_mode) or MODE_TO_POLICY.get(raw_mode.lower()) or default_policy
     return place, time_min, mode
 
 
@@ -234,10 +236,63 @@ class AmapIsochrone(Star):
         self.context = context
         self.config = config
         self._amap_key: str = str(self.config.get("amap_key", "")).strip()
-        logger.info("[AmapIsochrone] Plugin loaded. amap_key configured: %s", bool(self._amap_key))
+        # 可配置默认交通方式（高德地图可查询：地铁/公交/地铁公交/步行/驾车）
+        cfg_transport = str(self.config.get("default_transport", "地铁")).strip()
+        self._default_policy: str = MODE_TO_POLICY.get(cfg_transport) or MODE_TO_POLICY.get(cfg_transport.lower()) or DEFAULT_MODE
+        logger.info(
+            "[AmapIsochrone] Plugin loaded. amap_key=%s, default_transport=%s",
+            bool(self._amap_key),
+            cfg_transport or "地铁",
+        )
+
+    @filter.command("高德API测试")
+    async def cmd_amap_test(self, event: AstrMessageEvent):
+        """测试高德 Web 服务 API 是否联通（地理编码 + 到达圈）。"""
+        if not self._amap_key:
+            yield event.plain_result("请先配置 amap_key 后再测试。")
+            return
+        results = []
+        # 1) 地理编码
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                r = await client.get(
+                    "https://restapi.amap.com/v3/geocode/geo",
+                    params={"key": self._amap_key, "address": "北京市", "output": "json"},
+                )
+                r.raise_for_status()
+                data = r.json()
+                if data.get("status") == "1" and data.get("geocodes"):
+                    loc = data["geocodes"][0].get("location", "")
+                    results.append(f"地理编码: 正常（示例：北京市 -> {loc}）")
+                else:
+                    results.append(f"地理编码: 失败 {data.get('info', '')}")
+            except Exception as e:
+                results.append(f"地理编码: 请求异常 {e!r}")
+            # 2) 到达圈（可选，部分 Key 可能无权限）
+            try:
+                r2 = await client.get(
+                    "https://restapi.amap.com/v3/direction/reachcircle",
+                    params={
+                        "key": self._amap_key,
+                        "origin": "116.397428,39.90923",
+                        "time": 30,
+                        "policy": "SUBWAY",
+                        "output": "json",
+                    },
+                )
+                r2.raise_for_status()
+                d2 = r2.json()
+                if d2.get("status") == "1":
+                    results.append("到达圈(reachcircle): 正常")
+                else:
+                    results.append(f"到达圈: 失败 {d2.get('info', '无权限或服务不可用')}")
+            except Exception as e:
+                results.append(f"到达圈: 请求异常 {e!r}")
+        yield event.plain_result("高德 API 联通测试：\n" + "\n".join(results))
 
     @filter.command("等时圈")
     async def cmd_isochrone(self, event: AstrMessageEvent):
+        """仅通过 httpx 调用高德接口，拼接静态图 URL 后直接返回字符串，不写本地文件、不调用 send_message。"""
         if not self._amap_key:
             yield event.plain_result("请先在插件配置中填写高德 Web 服务 Key（amap_key）哦~")
             return
@@ -245,16 +300,18 @@ class AmapIsochrone(Star):
         if callable(raw):
             raw = raw()
         raw = (raw or "").strip()
-        place, time_min, mode = _parse_args(raw)
+        place, time_min, mode = _parse_args(raw, default_policy=self._default_policy)
         if not place:
-            yield event.plain_result("用法：等时圈 [地点名称] [时间/可选，1-60分钟] [方式/可选：公交、地铁、地铁公交]")
+            yield event.plain_result(
+                "用法：等时圈 [地点名称] [时间/可选，1-60分钟] [方式/可选：公交、地铁、地铁公交、步行、驾车]"
+            )
             return
-        # 1) 地理编码
+        # 1) 地理编码（httpx）
         location = await _geocode(place, self._amap_key)
         if not location:
             yield event.plain_result(f"没有找到「{place}」对应的位置哦，试试写更具体的地址或地标名~")
             return
-        # 2) 到达圈
+        # 2) 到达圈（httpx 调用 v3/direction/reachcircle）
         polygon_points = await _reachcircle(location, time_min, mode, self._amap_key)
         is_approx = False
         if not polygon_points:
@@ -267,11 +324,12 @@ class AmapIsochrone(Star):
                 yield event.plain_result("暂时无法生成该地点的到达圈，请稍后再试或检查 Key 权限。")
                 return
         zoom = _suggest_zoom(polygon_points)
+        # 3) 拼接高德静态地图 URL 字符串（不落盘、不 /tmp）
         static_url = _build_static_map_url(location, polygon_points, self._amap_key, zoom=zoom)
         if not static_url:
             yield event.plain_result("生成静态地图链接失败，请检查配置。")
             return
         analysis = _short_analysis(place, time_min, mode, is_approx)
-        # 图片 + 两个换行 + 文字，便于 splitter 单独发图
+        # 直接返回该格式字符串（不调用 send_message_to_user）
         msg = f"![等时圈]({static_url})\n\n\n呐~ 哥哥，这是以 {place} 为中心，{time_min} 分钟的出行等时圈。\n{analysis}"
         yield event.plain_result(msg)
