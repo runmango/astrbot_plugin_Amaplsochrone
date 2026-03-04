@@ -1,0 +1,15 @@
+# AstrBot 插件元数据（必填，用于识别与加载插件）
+id: amap_isochrone
+name: AmapIsochrone
+display_name: 高德等时圈（到达圈）可视化
+author: AstrBot
+version: "1.0.0"
+description: "根据任意地点生成高德等时圈静态图，支持地理编码、到达圈、静态图 URL，纯 API 调用无浏览器。"
+support_platforms:
+  - aiocqhttp
+  - satori
+  - kook
+  - discord
+  - telegram
+astrbot_version: ">=4.16,<5"
+repo: "https://github.com/runmango/astrbot_plugin_Amaplsochrone.git"
